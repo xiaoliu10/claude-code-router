@@ -319,7 +319,7 @@ async function handleTransformerEndpoint(
         }
       }
       if (systemMsgs.length > 0 && otherMsgs.length > 0) {
-        requestBody.messages = [...otherMsgs, ...systemMsgs];
+        requestBody.messages = [...systemMsgs, ...otherMsgs];
       }
     }
 

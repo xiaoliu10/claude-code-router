@@ -73,13 +73,21 @@ export class AnthropicTransformer implements Transformer {
 
     const requestMessages = JSON.parse(JSON.stringify(request.messages || []));
 
+    // First pass: push all system messages to ensure they come before user/assistant.
+    // DeepSeek + vLLM require [system, user] order; wrong order causes garbled output.
     requestMessages?.forEach((msg: any) => {
       if (msg.role === "system") {
         messages.push({
           role: "system",
           content: msg.content,
         });
-        return;
+      }
+    });
+
+    // Second pass: push user/assistant/tool messages in original order
+    requestMessages?.forEach((msg: any) => {
+      if (msg.role === "system") {
+        return; // Already handled in first pass
       }
 
       if (msg.role === "user" || msg.role === "assistant") {
