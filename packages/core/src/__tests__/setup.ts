@@ -1,17 +1,14 @@
 /**
- * vitest globalSetup — create an isolated temp HOME before tests run so
- * production code that imports HOME_DIR (from @wengine-ai/claude-code-router-shared)
- * writes into a per-run temp directory, never to the user's real
- * ~/.claude-code-router. The directory is cleaned up on teardown.
+ * vitest globalSetup — teardown for the isolated test HOME created in
+ * vitest.config.ts. The dir path is deterministic (ccr-core-test-home under the
+ * OS tmpdir) so this teardown can remove the same directory the workers used.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export function setup(): () => void {
-  const dir = mkdtempSync(join(tmpdir(), "ccr-test-"));
-  process.env.CCR_CONFIG_DIR = dir;
   return () => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(join(tmpdir(), "ccr-core-test-home"), { recursive: true, force: true });
   };
 }
