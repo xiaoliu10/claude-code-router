@@ -12,6 +12,11 @@ export const PRESETS_DIR = path.join(HOME_DIR, "presets");
 
 export const PID_FILE = path.join(HOME_DIR, '.claude-code-router.pid');
 
+// Managed clients can attach this header when they have a reliable project
+// identity but no Claude Code-compatible session metadata. The router validates
+// the value against the stored project config before using it.
+export const CCR_PROJECT_HEADER = "x-ccr-project";
+
 // CCR-managed client state: records the values CCR last wrote into a client's
 // settings file (e.g. ~/.claude/settings.json), so CCR can distinguish values it
 // wrote (safe to update/remove with the global config) from values the user hand-

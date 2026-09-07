@@ -3,7 +3,11 @@ import { sessionUsageCache, Usage } from "./cache";
 import { readFile } from "fs/promises";
 import { opendir, stat } from "fs/promises";
 import { join } from "path";
-import { CLAUDE_PROJECTS_DIR, HOME_DIR } from "@wengine-ai/claude-code-router-shared";
+import {
+  CLAUDE_PROJECTS_DIR,
+  HOME_DIR,
+  getClaudeProjectId,
+} from "@wengine-ai/claude-code-router-shared";
 import { ConfigService } from "../services/config";
 import { TokenizerService } from "../services/tokenizer";
 import { getHealthStore } from "../services/provider-health";
@@ -28,6 +32,8 @@ const PROJECT_ROUTING_STATUS_CODES: Record<string, number> = {
   quota_exhausted: 503,
   resolution_failed: 502,
   project_config_error: 500,
+  invalid_project_id: 400,
+  project_config_not_found: 404,
 };
 
 export class ProjectRoutingError extends Error {
@@ -181,52 +187,95 @@ export const calculateTokenCount = (
 
 const getProjectSpecificRouter = async (
   req: any,
-  configService: ConfigService
+  _configService: ConfigService
 ) => {
-  // Check if there is project-specific configuration
-  if (req.sessionId) {
-    const project = await searchProjectBySession(req.sessionId);
-    if (project) {
-      const projectConfigPath = join(HOME_DIR, project, "config.json");
+  // Session-based discovery remains the Claude Code path. Clients such as Pi
+  // that do not send Claude session metadata use a managed provider header.
+  const explicitProject = req.clientContext?.projectId;
+  if (
+    explicitProject
+    && (
+      typeof explicitProject !== "string"
+      || explicitProject.length > 1024
+      || explicitProject === "."
+      || explicitProject === ".."
+      || /[/\\\0]/.test(explicitProject)
+    )
+  ) {
+    throw new ProjectRoutingError(
+      `Project routing error: invalid managed project id "${String(explicitProject)}".`,
+      {
+        configuredTarget: String(explicitProject),
+        code: "invalid_project_id",
+      }
+    );
+  }
+
+  const project = explicitProject || (req.sessionId
+    ? await searchProjectBySession(req.sessionId)
+    : null);
+  if (project) {
+    req.projectId = project;
+    const projectConfigPath = join(HOME_DIR, project, "config.json");
+
+    // Only session-discovered clients have per-session Router overrides.
+    if (!explicitProject && req.sessionId) {
       const sessionConfigPath = join(
         HOME_DIR,
         project,
         `${req.sessionId}.json`
       );
-
-      // First try to read sessionConfig file.
-      // ENOENT is expected (no session override); other errors (malformed
-      // JSON, permission denied) are swallowed to maintain existing behavior
-      // — session override is best-effort and falls back to project config.
       try {
         const sessionConfig = JSON.parse(await readFile(sessionConfigPath, "utf8"));
         if (sessionConfig && sessionConfig.Router && Object.keys(sessionConfig.Router).length > 0) {
           return sessionConfig.Router;
         }
       } catch {}
+    }
 
-      // Project config.json: ENOENT means the project has no CCR config
-      // (fall back to global). But if the file EXISTS and is malformed, that
-      // is a real configuration error — surface it instead of silently using
-      // global routing.
-      try {
-        const projectConfig = JSON.parse(await readFile(projectConfigPath, "utf8"));
-        if (projectConfig && projectConfig.Router && Object.keys(projectConfig.Router).length > 0) {
-          return projectConfig.Router;
-        }
-      } catch (e: any) {
-        if (e && e.code !== "ENOENT") {
-          const sessionId = req.sessionId || req.clientContext?.stableSessionId;
-          throw new ProjectRoutingError(
-            `Project routing error: project config.json is malformed or unreadable in project "${project}". ${e.message}. Session: "${sessionId || "unknown"}".`,
-            {
-              sessionId,
-              configuredTarget: projectConfigPath,
-              code: "project_config_error",
-              statusCode: 500,
-            }
-          );
-        }
+    // A managed explicit project id must resolve to the exact stored project.
+    // Fail closed instead of silently escaping to the global Router when the
+    // provider is stale, malformed, or has been tampered with.
+    try {
+      const projectConfig = JSON.parse(await readFile(projectConfigPath, "utf8"));
+      if (
+        explicitProject
+        && typeof projectConfig?.projectPath === "string"
+        && getClaudeProjectId(projectConfig.projectPath) !== explicitProject
+      ) {
+        throw new ProjectRoutingError(
+          `Project routing error: managed project id "${explicitProject}" does not match its stored project path.`,
+          {
+            configuredTarget: projectConfigPath,
+            code: "invalid_project_id",
+          }
+        );
+      }
+      if (projectConfig && projectConfig.Router && Object.keys(projectConfig.Router).length > 0) {
+        return projectConfig.Router;
+      }
+    } catch (e: any) {
+      if (e instanceof ProjectRoutingError) throw e;
+      if (explicitProject && e?.code === "ENOENT") {
+        throw new ProjectRoutingError(
+          `Project routing error: managed project "${explicitProject}" no longer has a project config.`,
+          {
+            configuredTarget: projectConfigPath,
+            code: "project_config_not_found",
+          }
+        );
+      }
+      if (!e || e.code !== "ENOENT") {
+        const sessionId = req.sessionId || req.clientContext?.stableSessionId;
+        throw new ProjectRoutingError(
+          `Project routing error: project config.json is malformed or unreadable in project "${project}". ${e.message}. Session: "${sessionId || "unknown"}".`,
+          {
+            sessionId,
+            configuredTarget: projectConfigPath,
+            code: "project_config_error",
+            statusCode: 500,
+          }
+        );
       }
     }
   }
@@ -1094,7 +1143,9 @@ export const router = async (req: any, _res: any, context: RouterContext) => {
 
   // The adapter must run before project routing and token-threshold decisions so
   // all downstream logic consumes one client-specific request context.
-  applyClientAdapter(req, configService.getAll());
+  if (!req.clientContext || !req.usageCacheKey || !req.usageSessionId) {
+    applyClientAdapter(req, configService.getAll());
+  }
   const projectSpecificRouter = await getProjectSpecificRouter(req, configService);
   const routerConfig = projectSpecificRouter || configService.get("Router");
   const enableFallback = routerConfig?.enableFallback === true;

@@ -8,6 +8,7 @@ import {
   isClientId,
   listClientStatuses,
   restoreClient,
+  syncGlobalProjectTakeovers,
   type ClientApplyResult,
   type ClientId,
   type ClientOperationResult,
@@ -30,6 +31,7 @@ export async function enableConfiguredClientsForStart(): Promise<void> {
   const config = await readConfigFile();
   const result = enableConfiguredClients(config);
   await writeConfigFile(result.config);
+  await syncGlobalProjectTakeovers(result.config);
 
   if (!result.success) {
     printOperationResults(result);
@@ -105,6 +107,7 @@ async function runClientOperations(
   }
 
   await writeConfigFile(config);
+  await syncGlobalProjectTakeovers(config);
   return {
     success: results.every((item) => item.success),
     results,
@@ -126,6 +129,7 @@ export async function handleClientsCommand(args: string[]): Promise<void> {
       const config = await readConfigFile();
       const result = applyClientSelection(config, validateClientArgs(args.slice(1), true));
       await writeConfigFile(result.config);
+      await syncGlobalProjectTakeovers(result.config);
       printOperationResults(result);
       if (!result.success) process.exit(1);
       return;

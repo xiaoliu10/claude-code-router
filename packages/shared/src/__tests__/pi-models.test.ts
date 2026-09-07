@@ -1,8 +1,10 @@
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,9 +12,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_CONTEXT_WINDOW,
   applyPiProjectTakeover,
+  disableClient,
   enableClient,
   getContextWindow,
+  getPiProjectProviderName,
+  removePiProjectTakeover,
 } from "../client-integrations";
+import { CCR_PROJECT_HEADER, getClaudeProjectId } from "../constants";
 
 const tempDirs: string[] = [];
 
@@ -120,5 +126,104 @@ describe("Pi managed models", () => {
 
     expect(statSync(modelsPath).mtimeMs).toBe(initialModelsMtime);
     expect(statSync(settingsPath).mtimeMs).toBe(initialSettingsMtime);
+  });
+
+  it("registers a dedicated project provider carrying the managed project id", () => {
+    const { piDir, projectDir } = createFixture();
+    const config = {
+      APIKEY: "test-key",
+      PORT: 4567,
+      Router: { default: "provider,project-model" },
+      Clients: { pi: { configPath: piDir } },
+    };
+
+    applyPiProjectTakeover(projectDir, config);
+
+    const providerName = getPiProjectProviderName(projectDir);
+    const settings = readJson(join(projectDir, ".pi", "settings.json"));
+    const provider = readJson(join(piDir, "models.json")).providers[providerName];
+    expect(settings).toMatchObject({
+      defaultProvider: providerName,
+      defaultModel: "ccr-opus",
+    });
+    expect(provider).toMatchObject({
+      baseUrl: "http://127.0.0.1:4567",
+      headers: {
+        [CCR_PROJECT_HEADER]: getClaudeProjectId(projectDir),
+      },
+    });
+  });
+
+  it("preserves dedicated project providers when global Pi takeover is disabled", () => {
+    const { piDir, projectDir } = createFixture();
+    mkdirSync(piDir, { recursive: true });
+    writeFileSync(join(piDir, "models.json"), JSON.stringify({
+      providers: { official: { name: "Official" } },
+    }));
+    writeFileSync(join(piDir, "settings.json"), JSON.stringify({
+      defaultProvider: "official",
+      defaultModel: "official-model",
+    }));
+    const config = {
+      APIKEY: "test-key",
+      Router: { default: "provider,project-model" },
+      Clients: { pi: { configPath: piDir } },
+    };
+
+    enableClient(config, "pi");
+    applyPiProjectTakeover(projectDir, config);
+    const projectProvider = getPiProjectProviderName(projectDir);
+    disableClient(config, "pi");
+
+    const models = readJson(join(piDir, "models.json"));
+    expect(Object.keys(models.providers).sort()).toEqual(["official", projectProvider].sort());
+    expect(models.providers[projectProvider].headers[CCR_PROJECT_HEADER]).toBe(
+      getClaudeProjectId(projectDir)
+    );
+    expect(readJson(join(piDir, "settings.json"))).toMatchObject({
+      defaultProvider: "official",
+      defaultModel: "official-model",
+    });
+  });
+
+  it("removes only the provider owned by the disabled project takeover", () => {
+    const { piDir, projectDir } = createFixture();
+    const otherProject = join(projectDir, "other");
+    const config = {
+      APIKEY: "test-key",
+      Router: { default: "provider,project-model" },
+      Clients: { pi: { configPath: piDir } },
+    };
+    applyPiProjectTakeover(projectDir, config);
+    applyPiProjectTakeover(otherProject, config);
+
+    removePiProjectTakeover(projectDir, config);
+
+    const providers = readJson(join(piDir, "models.json")).providers;
+    expect(providers[getPiProjectProviderName(projectDir)]).toBeUndefined();
+    expect(providers[getPiProjectProviderName(otherProject)]).toBeDefined();
+  });
+
+  it("does not treat another project's provider as this project's takeover", () => {
+    const { piDir, projectDir } = createFixture();
+    const otherProject = join(projectDir, "other");
+    const config = {
+      APIKEY: "test-key",
+      Router: { default: "provider,project-model" },
+      Clients: { pi: { configPath: piDir } },
+    };
+    applyPiProjectTakeover(otherProject, config);
+    mkdirSync(join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({
+      defaultProvider: getPiProjectProviderName(otherProject),
+      defaultModel: "ccr-opus",
+    }));
+
+    removePiProjectTakeover(projectDir, config);
+
+    const settings = readJson(join(projectDir, ".pi", "settings.json"));
+    const providers = readJson(join(piDir, "models.json")).providers;
+    expect(settings.defaultProvider).toBe(getPiProjectProviderName(otherProject));
+    expect(providers[getPiProjectProviderName(otherProject)]).toBeDefined();
   });
 });

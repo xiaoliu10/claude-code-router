@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { CCR_PROJECT_HEADER } from "@wengine-ai/claude-code-router-shared";
 import { extractSessionIdFromUserId } from "../utils/session-id";
 
 export const CLIENT_TYPES = [
@@ -18,6 +19,7 @@ export interface ClientContext {
   clientType: ClientType;
   usageScope: ClientUsageScope;
   stableSessionId?: string;
+  projectId?: string;
   supportsExplicitExtendedContext: boolean;
   longContextThreshold?: number;
   extendedContextThreshold?: number;
@@ -49,6 +51,15 @@ function getPathname(req: any): string {
   } catch {
     return req.url;
   }
+}
+
+function getHeader(req: any, name: string): string | undefined {
+  const value = req?.headers?.[name.toLowerCase()];
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0].trim()) {
+    return value[0].trim();
+  }
+  return undefined;
 }
 
 function requestScopeContext(
@@ -85,14 +96,17 @@ const claudeCodeAdapter: ClientAdapter = {
 
 const piAdapter: ClientAdapter = {
   type: "pi",
-  createContext() {
+  createContext(req) {
     // pi no longer derives extendedContextThreshold from a per-client ratio of
     // its own context window. Like every other client it inherits the absolute
     // threshold chain: familyConfig.extendedContextThreshold ->
     // Router.extendedContextThreshold -> 200000. The threshold represents the
     // default target model's usable window (which other models may not support),
     // not pi's own client window, so a uniform absolute value is correct.
-    return requestScopeContext("pi", false);
+    return {
+      ...requestScopeContext("pi", false),
+      projectId: getHeader(req, CCR_PROJECT_HEADER),
+    };
   },
 };
 
@@ -165,6 +179,7 @@ export function detectClientType(req: any): ClientType {
   if (/\bYou are opencode\b/i.test(sysHead)) {
     return "opencode";
   }
+  if (getHeader(req, CCR_PROJECT_HEADER)) return "pi";
 
   const billingHeader = headers["x-anthropic-billing-header"];
   if (typeof billingHeader === "string" && billingHeader.includes("cc_version=")) {
@@ -230,6 +245,18 @@ export function applyClientAdapter(
     req.sessionId = context.stableSessionId;
   } else {
     delete req.sessionId;
+  }
+  if (context.projectId) {
+    req.projectId = context.projectId;
+    // The project id is router-internal metadata. Keep it on the request
+    // context, but never let passthrough providers forward it upstream.
+    if (req.headers && typeof req.headers === "object") {
+      for (const key of Object.keys(req.headers)) {
+        if (key.toLowerCase() === CCR_PROJECT_HEADER) delete req.headers[key];
+      }
+    }
+  } else {
+    delete req.projectId;
   }
   req.usageSessionId = usageSessionId;
   req.usageCacheKey = `${clientType}:${scopeLabel}:${usageSessionId}`;

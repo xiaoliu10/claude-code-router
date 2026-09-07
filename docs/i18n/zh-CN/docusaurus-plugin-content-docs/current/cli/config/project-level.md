@@ -70,6 +70,17 @@ Web UI（`ccr ui`）的设置页中提供了一个 **Projects（项目配置）*
 
 这与在该项目目录下运行 `ccr model --project` 效果相同，但可以在一个页面中集中管理所有已配置的项目，无需为每个项目单独打开终端。
 
+### 项目接管与 Pi
+
+在项目接管客户端列表中勾选 **Pi** 后，Pi 支持项目级路由。CCR 会写入
+`<project>/.pi/settings.json`，并在 Pi 的全局 `~/.pi/agent/models.json` 中注册该项目专用的
+`ccr-project-*` provider。该 provider 会在每次请求中携带受管项目标识，因此 CCR 无需依赖
+Claude Code 会话记录，就能直接加载对应项目的 `Router`。
+
+每个项目的 provider 都是独立的，请勿将其改回共享的全局 `ccr` provider。旧版共享 provider
+接管会在 CCR 启动或刷新客户端配置时自动迁移；关闭全局 Pi 接管也不会关闭仍处于接管状态的
+Pi 项目。
+
 ## 使用 `ccr model --project` 管理项目配置
 
 推荐使用交互式 CLI 来管理项目级路由：

@@ -51,6 +51,7 @@ import {
   getClaudeProjectId,
   getProjectConfigPath,
   refreshCcrProjectTakeover,
+  refreshPiProjectTakeover,
   refreshProjectTakeovers,
   syncGlobalProjectTakeovers,
   getProjectTakeoverClients,
@@ -349,6 +350,7 @@ export async function registerAdminRoutes(server: any, config: any): Promise<any
       const config = await readConfigFile();
       const result = applyClientSelection(config, enabled);
       await writeConfigFile(result.config);
+      await syncGlobalProjectTakeovers(result.config);
       return result;
     } catch (error: any) {
       console.error("Failed to apply client integrations:", error);
@@ -372,6 +374,7 @@ export async function registerAdminRoutes(server: any, config: any): Promise<any
             ? restoreClient(config, id)
             : disableClient(config, id);
       await writeConfigFile(config);
+      await syncGlobalProjectTakeovers(config);
 
       return {
         success: result.success,
@@ -488,6 +491,7 @@ export async function registerAdminRoutes(server: any, config: any): Promise<any
         await refreshProjectTakeovers(existing.path, config);
       } else {
         await refreshCcrProjectTakeover(existing.path, config, Router);
+        await refreshPiProjectTakeover(existing.path, config, Router);
       }
       const ccrTakeoverClients = await getProjectTakeoverClients(existing.path);
       return {
