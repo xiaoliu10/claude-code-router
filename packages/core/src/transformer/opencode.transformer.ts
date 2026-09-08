@@ -1,6 +1,7 @@
 import { UnifiedChatRequest } from "@/types/llm";
 import { Transformer, TransformerOptions } from "../types/transformer";
 import { parseResponseJson } from "./response-body";
+import { extractSessionIdFromUserId } from "../utils/session-id";
 import { v4 as uuidv4 } from "uuid";
 
 /**
@@ -28,6 +29,10 @@ import { v4 as uuidv4 } from "uuid";
  *   thinking format expected by Claude Code.
  * - Replaces purely-numeric tool_call IDs with UUID-based IDs to avoid
  *   downstream parsing issues.
+ * - Sends a stable x-opencode-session header. OpenCode Go rejects requests
+ *   without it (400 MissingSessionID) and uses the value for routing and
+ *   prompt caching, so it must stay constant for the whole conversation —
+ *   reusing the coding agent's own session id is the intended usage.
  */
 export class OpenCodeTransformer implements Transformer {
   static TransformerName = "opencode";
@@ -35,9 +40,47 @@ export class OpenCodeTransformer implements Transformer {
 
   constructor(private readonly options?: TransformerOptions) {}
 
+  /**
+   * Resolve a stable per-conversation session id for x-opencode-session.
+   *
+   * Priority: the client's own x-opencode-session header (opencode CLI native),
+   * the session id CCR's client adapter already extracted (Claude Code encodes
+   * it in metadata.user_id), the same value mirrored onto req.sessionId, a
+   * direct extraction from the body's metadata.user_id, and finally the Codex
+   * native session_id header. A per-request UUID is the last resort: it keeps
+   * Go endpoints from 400ing but forfeits their cross-request cache affinity.
+   */
+  private resolveSessionId(
+    request: UnifiedChatRequest,
+    context?: Record<string, any>
+  ): string {
+    const req = context?.req;
+    const headers = req?.headers || {};
+    const pickHeader = (name: string): string | undefined => {
+      const key = Object.keys(headers).find(
+        (candidate) => candidate.toLowerCase() === name
+      );
+      const value = key ? headers[key] : undefined;
+      return typeof value === "string" && value.trim()
+        ? value.trim()
+        : undefined;
+    };
+
+    return (
+      pickHeader("x-opencode-session") ||
+      req?.clientContext?.stableSessionId ||
+      req?.sessionId ||
+      extractSessionIdFromUserId((request as any).metadata?.user_id) ||
+      pickHeader("session_id") ||
+      uuidv4()
+    );
+  }
+
   async transformRequestIn(
-    request: UnifiedChatRequest
-  ): Promise<UnifiedChatRequest> {
+    request: UnifiedChatRequest,
+    provider?: any,
+    context?: Record<string, any>
+  ): Promise<Record<string, any>> {
     const hasThinking =
       request.reasoning?.enabled ||
       request.messages.some((message) => message.thinking?.content);
@@ -94,7 +137,18 @@ export class OpenCodeTransformer implements Transformer {
 
     // Apply any additional options from config (e.g. custom params)
     Object.assign(request, this.options || {});
-    return request;
+
+    // OpenCode Go requires a session identifier and drops the client's own
+    // headers when CCR rebuilds the upstream request, so re-attach the stable
+    // conversation id via config.headers (merged into the outgoing request).
+    return {
+      body: request,
+      config: {
+        headers: {
+          "x-opencode-session": this.resolveSessionId(request, context),
+        },
+      },
+    };
   }
 
   async transformResponseOut(response: Response): Promise<Response> {

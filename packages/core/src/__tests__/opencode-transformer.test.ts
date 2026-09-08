@@ -71,7 +71,7 @@ describe("OpenCodeTransformer", () => {
       ],
     });
 
-    const result = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
+    const { body: result } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
     const msg = result.messages[0];
     if (Array.isArray(msg.content)) {
       const textItem = (msg.content as any[]).find((i: any) => i.type === "text");
@@ -96,13 +96,13 @@ describe("OpenCodeTransformer", () => {
 
     const unified = await anthropicTransformer.transformRequestOut(anthropicRequest as any);
     const t = new OpenCodeTransformer();
-    const processed = await t.transformRequestIn(
+    const { body: processed } = await t.transformRequestIn(
       unified,
       makeProvider("https://opencode.ai/zen/go/v1/chat/completions"),
       {}
     );
 
-    const sysMsg = processed.messages.find((m) => m.role === "system");
+    const sysMsg = (processed.messages as any[]).find((m) => m.role === "system");
     expect(sysMsg).toBeDefined();
     const block = Array.isArray(sysMsg!.content)
       ? (sysMsg!.content as any[]).find((i: any) => i.type === "text")
@@ -133,7 +133,7 @@ describe("OpenCodeTransformer", () => {
       ],
     });
 
-    const result = await t.transformRequestIn(request);
+    const { body: result } = await t.transformRequestIn(request);
     const assistant = result.messages[0] as any;
     expect(assistant.reasoning_content).toBe(
       "The file likely contains the relevant implementation."
@@ -161,7 +161,7 @@ describe("OpenCodeTransformer", () => {
       ],
     });
 
-    const result = await t.transformRequestIn(request);
+    const { body: result } = await t.transformRequestIn(request);
     expect((result.messages[0] as any).reasoning_content).toBe(" ");
   });
 
@@ -183,7 +183,7 @@ describe("OpenCodeTransformer", () => {
       ],
     });
 
-    const result = await t.transformRequestIn(request);
+    const { body: result } = await t.transformRequestIn(request);
     expect((result.messages[0] as any).reasoning_content).toBeUndefined();
   });
 
@@ -204,7 +204,7 @@ describe("OpenCodeTransformer", () => {
       ],
     });
 
-    const result = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
+    const { body: result } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
     const msg = result.messages[0];
     if (Array.isArray(msg.content)) {
       const imgItem = (msg.content as any[]).find((i: any) => i.type === "image_url");
@@ -216,7 +216,7 @@ describe("OpenCodeTransformer", () => {
     const t = new OpenCodeTransformer();
     const request = makeRequest();
 
-    const result = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
+    const { body: result } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
     expect(result.tools).toBeDefined();
     expect(result.tools!.length).toBe(1);
     expect(result.tools![0].type).toBe("function");
@@ -227,8 +227,64 @@ describe("OpenCodeTransformer", () => {
     const t = new OpenCodeTransformer({ temperature: 0.5 });
     const request = makeRequest();
 
-    const result = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
+    const { body: result, config } = await t.transformRequestIn(
+      request,
+      makeProvider("https://opencode.ai"),
+      {}
+    );
     expect(result.temperature).toBe(0.5);
+    // The {body, config} shape is required so routes.ts merges the session
+    // header into the outgoing request headers.
+    expect(config?.headers?.["x-opencode-session"]).toBeDefined();
+  });
+});
+
+describe("OpenCodeTransformer x-opencode-session", () => {
+  it("should extract a stable session id from Claude Code metadata.user_id", async () => {
+    const t = new OpenCodeTransformer();
+    const request = makeRequest({
+      metadata: { user_id: "user_ab12cd34__session_8f0e1d2c3b4a" },
+    } as any);
+
+    const { config } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
+    expect(config?.headers?.["x-opencode-session"]).toBe("8f0e1d2c3b4a");
+  });
+
+  it("should prefer the client adapter's stableSessionId from the request context", async () => {
+    const t = new OpenCodeTransformer();
+    const request = makeRequest();
+    const context = {
+      req: {
+        clientContext: { stableSessionId: "adapter-session" },
+        sessionId: "adapter-session",
+        headers: {},
+      },
+    };
+
+    const { config } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), context);
+    expect(config?.headers?.["x-opencode-session"]).toBe("adapter-session");
+  });
+
+  it("should preserve an incoming x-opencode-session header from a native opencode client", async () => {
+    const t = new OpenCodeTransformer();
+    const request = makeRequest();
+    const context = {
+      req: { headers: { "x-opencode-session": "native-opencode-session" } },
+    };
+
+    const { config } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), context);
+    expect(config?.headers?.["x-opencode-session"]).toBe("native-opencode-session");
+  });
+
+  it("should fall back to a UUID-shaped id when no session source exists", async () => {
+    const t = new OpenCodeTransformer();
+    const request = makeRequest();
+
+    const { config } = await t.transformRequestIn(request, makeProvider("https://opencode.ai"), {});
+    const value = config?.headers?.["x-opencode-session"];
+    expect(value).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
   });
 });
 
@@ -291,7 +347,7 @@ describe("End-to-end: Anthropic request → OpenCode provider tools format", () 
 
     // Step 2: Simulate OpenCodeTransformer.transformRequestIn
     const openCodeTransformer = new OpenCodeTransformer();
-    const processedRequest = await openCodeTransformer.transformRequestIn(
+    const { body: processedRequest } = await openCodeTransformer.transformRequestIn(
       unifiedRequest,
       makeProvider("https://opencode.ai/zen/go/v1/chat/completions"),
       {}
