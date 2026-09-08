@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { CCR_PROJECT_HEADER } from "@wengine-ai/claude-code-router-shared";
 import {
   applyClientAdapter,
   builtinClientAdapterRegistry,
@@ -176,6 +177,44 @@ describe("applyClientAdapter", () => {
     expect(qwen.usageSessionId).toBe("shared-session");
     expect(claude.usageCacheKey).toBe("claude-code:session:shared-session");
     expect(qwen.usageCacheKey).toBe("qwen-code:session:shared-session");
+  });
+
+  it("extracts the managed project id from a Pi provider header", () => {
+    const req = request({
+      id: "pi-project",
+      headers: { [CCR_PROJECT_HEADER]: "-Users-test-project" },
+      body: { model: "ccr-opus", messages: [] },
+    });
+
+    applyClientAdapter(req, {});
+
+    expect(req.clientType).toBe("pi");
+    expect(req.clientContext).toMatchObject({
+      clientType: "pi",
+      usageScope: "request",
+      projectId: "-Users-test-project",
+      projectHeaderPresent: true,
+    });
+    expect(req.projectId).toBe("-Users-test-project");
+    expect(req.sessionId).toBeUndefined();
+    expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
+  });
+
+  it("preserves an empty managed project id for validation and strips its header", () => {
+    const req = request({
+      id: "pi-empty-project",
+      headers: { [CCR_PROJECT_HEADER]: "   " },
+      body: { model: "ccr-opus", messages: [] },
+    });
+
+    applyClientAdapter(req, {});
+
+    expect(req.clientType).toBe("pi");
+    expect(req.clientContext).toMatchObject({
+      projectId: "",
+      projectHeaderPresent: true,
+    });
+    expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
   });
 
   it.each([

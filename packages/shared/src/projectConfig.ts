@@ -301,12 +301,15 @@ export async function setProjectTakeover(
   config: Record<string, any>
 ): Promise<ClientId[]> {
   const want = new Set(clients.filter((id) => PROJECT_TAKEOVER_CLIENT_IDS.includes(id)));
+  const piTakeoverConfig = want.has("pi")
+    ? await resolveProjectTakeoverConfig(projectPath, config)
+    : config;
   for (const id of PROJECT_TAKEOVER_CLIENT_IDS) {
     if (id === "claudeCode") {
       await setCcrTakeover(projectPath, want.has(id), config);
     } else if (id === "pi") {
-      if (want.has(id)) applyPiProjectTakeover(projectPath, config);
-      else removePiProjectTakeover(projectPath);
+      if (want.has(id)) applyPiProjectTakeover(projectPath, piTakeoverConfig);
+      else removePiProjectTakeover(projectPath, config);
     } else if (id === "qwenCode") {
       if (want.has(id)) applyQwenProjectTakeover(projectPath, config);
       else removeQwenProjectTakeover(projectPath);
@@ -316,6 +319,18 @@ export async function setProjectTakeover(
     }
   }
   return getProjectTakeoverClients(projectPath);
+}
+
+/** Refresh an active Pi takeover with the effective Router for this project. */
+export async function refreshPiProjectTakeover(
+  projectPath: string,
+  config: Record<string, any>,
+  projectRouter?: Record<string, any>,
+): Promise<boolean> {
+  if (!isPiProjectTakeoverActive(projectPath)) return false;
+  const takeoverConfig = await resolveProjectTakeoverConfig(projectPath, config, projectRouter);
+  applyPiProjectTakeover(projectPath, takeoverConfig);
+  return true;
 }
 
 /**
@@ -332,8 +347,7 @@ export async function refreshProjectTakeovers(
   if (await refreshCcrProjectTakeover(projectPath, config)) {
     refreshed = true;
   }
-  if (isPiProjectTakeoverActive(projectPath)) {
-    applyPiProjectTakeover(projectPath, config);
+  if (await refreshPiProjectTakeover(projectPath, config)) {
     refreshed = true;
   }
   if (isQwenProjectTakeoverActive(projectPath)) {
@@ -350,9 +364,9 @@ export async function refreshProjectTakeovers(
 /**
  * Refresh project-scoped takeover settings after the global config changes.
  * Projects following the global Router refresh every active client. Projects
- * with an authoritative local Router refresh only Claude Code, so global
+ * with an authoritative local Router refresh Claude Code and Pi, so global
  * connection/context settings propagate without leaking global model aliases
- * into the project or changing other clients' existing project semantics.
+ * into the project. The other clients retain their existing project semantics.
  */
 export async function syncGlobalProjectTakeovers(config: Record<string, any>): Promise<ProjectTakeoverSyncResult> {
   const result: ProjectTakeoverSyncResult = { updated: 0, skipped: 0, failed: [] };
@@ -360,9 +374,14 @@ export async function syncGlobalProjectTakeovers(config: Record<string, any>): P
 
   for (const project of projects) {
     try {
-      const updated = isUsingGlobalRouter(project.Router)
-        ? await refreshProjectTakeovers(project.path, config)
-        : await refreshCcrProjectTakeover(project.path, config, project.Router);
+      let updated: boolean;
+      if (isUsingGlobalRouter(project.Router)) {
+        updated = await refreshProjectTakeovers(project.path, config);
+      } else {
+        const claudeUpdated = await refreshCcrProjectTakeover(project.path, config, project.Router);
+        const piUpdated = await refreshPiProjectTakeover(project.path, config, project.Router);
+        updated = claudeUpdated || piUpdated;
+      }
       if (!updated) {
         result.skipped++;
         continue;

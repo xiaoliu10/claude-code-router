@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HOME_DIR, CLIENT_STATE_FILE, getProjectConfigDir } from "./constants";
+import { createHash } from "node:crypto";
+import {
+  HOME_DIR,
+  CLIENT_STATE_FILE,
+  CCR_PROJECT_HEADER,
+  getClaudeProjectId,
+  getProjectConfigDir,
+} from "./constants";
 
 export const CLIENT_IDS = ["claudeCode", "codex", "pi", "qwenCode", "opencode"] as const;
 export type ClientId = (typeof CLIENT_IDS)[number];
@@ -1222,15 +1229,16 @@ const codexAdapter: ClientAdapter = {
 //
 // pi keeps its config in a directory (~/.pi/agent by default) across three
 // JSON files. To route pi through ccr we only touch two of them:
-//   - models.json:   register a custom "ccr" provider (Anthropic-compatible,
-//                     baseUrl = ccr proxy) with the ccr family-alias models;
-//                     the api key lives on the provider entry, so we never
-//                     touch auth.json.
-//   - settings.json: point defaultProvider/defaultModel at the ccr provider.
+//   - models.json: register Anthropic-compatible CCR providers with family
+//                  aliases. Global takeover uses "ccr"; project takeovers use
+//                  dedicated "ccr-project-*" providers. API keys live here, so
+//                  auth.json remains untouched.
+//   - settings.json: select the relevant provider and default model.
 // pi speaks the Anthropic /v1/messages protocol (like Claude Code), so no
 // transformer is needed on the ccr side.
 
 const PI_PROVIDER_NAME = "ccr";
+const PI_PROJECT_PROVIDER_PREFIX = "ccr-project-";
 // pi's Anthropic-messages API id; baseUrl is the root (the SDK appends
 // /v1/messages), matching how Claude Code uses ANTHROPIC_BASE_URL.
 const PI_ANTHROPIC_API = "anthropic-messages";
@@ -1349,12 +1357,31 @@ const piAdapter: ClientAdapter = {
   disable(config) {
     const paths = getPiPaths(config);
 
-    // models.json: restore the pre-takeover file, or just drop the ccr provider.
+    // Project-scoped providers are independent of the global Pi switch. Keep
+    // exactly the currently registered project providers while restoring the
+    // user's pre-takeover global models file.
+    const currentModels = readJsonObject(paths.models);
+    const projectProviders = isObject(currentModels.providers)
+      ? Object.fromEntries(
+          Object.entries(currentModels.providers)
+            .filter(([name]) => isPiProjectProviderName(name))
+        )
+      : {};
+
+    // models.json: restore the pre-takeover file, or just drop the global ccr
+    // provider. Never remove providers still used by project takeovers.
     let models: Record<string, any>;
     if (restoreLatestBackup("pi/models", paths.models)) {
       models = readJsonObject(paths.models);
+      if (!isObject(models.providers)) models.providers = {};
+      for (const name of Object.keys(models.providers)) {
+        if (isPiProjectProviderName(name)) delete models.providers[name];
+      }
+      delete models.providers[PI_PROVIDER_NAME];
+      Object.assign(models.providers, projectProviders);
+      writeJsonObject(paths.models, models);
     } else {
-      models = readJsonObject(paths.models);
+      models = currentModels;
       if (isObject(models.providers) && models.providers[PI_PROVIDER_NAME]) {
         delete models.providers[PI_PROVIDER_NAME];
         writeJsonObject(paths.models, models);
@@ -1383,30 +1410,46 @@ const piAdapter: ClientAdapter = {
 };
 
 /**
- * Register (or refresh) the global "ccr" provider in pi's `models.json`.
+ * Register (or refresh) a CCR provider in pi's global `models.json`.
  *
  * pi has no project-level `models.json` — only `.pi/settings.json` overrides
- * are project-scoped — so the provider definition always lives globally. It is
- * just an *available* provider (baseUrl = ccr proxy); it does not route
- * anything by itself until a settings file points `defaultProvider` at it.
- * Writing it is idempotent, so both the global and project-level pi takeovers
- * call this. Returns the model id callers should set as `defaultModel`.
+ * are project-scoped — so both the shared global provider and dedicated
+ * project providers live globally. They remain inactive until a settings file
+ * selects them. Returns the model id callers should set as `defaultModel`.
  */
-function ensurePiCcrProvider(config: Record<string, any>): { defaultModel: string } {
+function ensurePiCcrProvider(
+  config: Record<string, any>,
+  providerName = PI_PROVIDER_NAME,
+  headers?: Record<string, string>,
+): { defaultModel: string } {
   const paths = getPiPaths(config);
   const { models: ccrModels, defaultModel } = getPiModels(config);
 
   const models = readJsonObject(paths.models);
   if (!isObject(models.providers)) models.providers = {};
-  models.providers[PI_PROVIDER_NAME] = {
+  models.providers[providerName] = {
     name: "Claude Code Router",
     baseUrl: getCcrBaseUrl(config),
     api: PI_ANTHROPIC_API,
     apiKey: config.APIKEY || "test",
+    ...(headers ? { headers } : {}),
     models: ccrModels,
   };
   writeJsonObject(paths.models, models);
   return { defaultModel };
+}
+
+/** Stable provider id used by one Pi project takeover. */
+export function getPiProjectProviderName(projectPath: string): string {
+  const digest = createHash("sha256")
+    .update(getClaudeProjectId(projectPath))
+    .digest("hex")
+    .slice(0, 16);
+  return `${PI_PROJECT_PROVIDER_PREFIX}${digest}`;
+}
+
+function isPiProjectProviderName(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith(PI_PROJECT_PROVIDER_PREFIX);
 }
 
 /**
@@ -1438,18 +1481,21 @@ function addPiProjectTrust(projectPath: string, config: Record<string, any>): vo
 }
 
 /**
- * Enable ccr takeover for a single project's pi configuration: register the
- * global ccr provider (idempotent), trust the project folder, and point the
- * project's `.pi/settings.json` `defaultProvider`/`defaultModel` at ccr. Other
- * keys in `.pi/settings.json` are preserved.
+ * Enable ccr takeover for a single project's pi configuration: register its
+ * dedicated global provider (idempotent), trust the project folder, and point
+ * the project's `.pi/settings.json` at that provider. Other settings are
+ * preserved.
  */
 export function applyPiProjectTakeover(projectPath: string, config: Record<string, any>): void {
-  const { defaultModel } = ensurePiCcrProvider(config);
+  const providerName = getPiProjectProviderName(projectPath);
+  const { defaultModel } = ensurePiCcrProvider(config, providerName, {
+    [CCR_PROJECT_HEADER]: getClaudeProjectId(projectPath),
+  });
   addPiProjectTrust(projectPath, config);
 
   const settingsPath = getPiProjectSettingsPath(projectPath);
   const settings = readJsonObject(settingsPath);
-  settings.defaultProvider = PI_PROVIDER_NAME;
+  settings.defaultProvider = providerName;
   settings.defaultModel = defaultModel;
   writeJsonObject(settingsPath, settings);
 }
@@ -1457,29 +1503,42 @@ export function applyPiProjectTakeover(projectPath: string, config: Record<strin
 /**
  * Disable ccr takeover for a project's pi configuration by clearing the ccr
  * `defaultProvider`/`defaultModel` from `.pi/settings.json` (removing the file
- * if nothing else remains). The shared global provider definition and trust
- * entry are intentionally left in place, since other projects may rely on them.
+ * if nothing else remains) and removing its dedicated global provider. The
+ * legacy shared provider and trust entry are left in place.
  */
-export function removePiProjectTakeover(projectPath: string): void {
+export function removePiProjectTakeover(
+  projectPath: string,
+  config: Record<string, any>,
+): void {
+  const expectedProviderName = getPiProjectProviderName(projectPath);
   const settingsPath = getPiProjectSettingsPath(projectPath);
-  if (!fs.existsSync(settingsPath)) return;
+  if (fs.existsSync(settingsPath)) {
+    const settings = readJsonObject(settingsPath);
+    const providerName = settings.defaultProvider;
+    if (providerName === PI_PROVIDER_NAME || providerName === expectedProviderName) {
+      delete settings.defaultProvider;
+      delete settings.defaultModel;
+      if (Object.keys(settings).length === 0) {
+        fs.unlinkSync(settingsPath);
+      } else {
+        writeJsonObject(settingsPath, settings);
+      }
+    }
+  }
 
-  const settings = readJsonObject(settingsPath);
-  if (settings.defaultProvider !== PI_PROVIDER_NAME) return;
-
-  delete settings.defaultProvider;
-  delete settings.defaultModel;
-  if (Object.keys(settings).length === 0) {
-    fs.unlinkSync(settingsPath);
-  } else {
-    writeJsonObject(settingsPath, settings);
+  const paths = getPiPaths(config);
+  const models = readJsonObject(paths.models);
+  if (isObject(models.providers) && models.providers[expectedProviderName]) {
+    delete models.providers[expectedProviderName];
+    writeJsonObject(paths.models, models);
   }
 }
 
 /** Whether a project's `.pi/settings.json` currently routes pi through ccr. */
 export function isPiProjectTakeoverActive(projectPath: string): boolean {
   const settings = readJsonObject(getPiProjectSettingsPath(projectPath));
-  return settings.defaultProvider === PI_PROVIDER_NAME;
+  return settings.defaultProvider === PI_PROVIDER_NAME
+    || settings.defaultProvider === getPiProjectProviderName(projectPath);
 }
 
 // ========================= qwen-code (Alibaba) =========================

@@ -5,11 +5,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   getClaudeSettingsLocalPath,
   refreshCcrProjectTakeover,
+  setProjectTakeover,
   setCcrTakeover,
   syncGlobalProjectTakeovers,
   writeProjectConfig,
 } from "../projectConfig";
 import { getProjectConfigDir } from "../constants";
+import { getPiProjectProviderName } from "../client-integrations";
 
 const projectPaths: string[] = [];
 
@@ -123,5 +125,66 @@ describe("project takeover Router synchronization", () => {
 
     expect(result).toMatchObject({ updated: 0, skipped: 1, failed: [] });
     expect(readFileSync(qwenSettingsPath, "utf8")).toBe(before);
+  });
+
+  it("creates and refreshes Pi takeover from the authoritative project Router", async () => {
+    const projectPath = createProject();
+    const piDir = join(projectPath, "pi-agent");
+    const config = {
+      ...globalConfig(),
+      Clients: { pi: { configPath: piDir } },
+    };
+    await writeProjectConfig(projectPath, { Router: projectRouter(false) });
+
+    await setProjectTakeover(projectPath, ["pi"], config);
+
+    const providerName = getPiProjectProviderName(projectPath);
+    const projectSettings = JSON.parse(
+      readFileSync(join(projectPath, ".pi", "settings.json"), "utf8")
+    );
+    expect(projectSettings.defaultProvider).toBe(providerName);
+    let provider = JSON.parse(readFileSync(join(piDir, "models.json"), "utf8"))
+      .providers[providerName];
+    expect(provider.models.map((model: any) => model.id)).toEqual(["ccr-opus"]);
+
+    const nextRouter = {
+      enableFamilyRouting: true,
+      families: {
+        sonnet: { default: "provider,project-sonnet" },
+      },
+    };
+    await writeProjectConfig(projectPath, { Router: nextRouter });
+    const result = await syncGlobalProjectTakeovers(config);
+
+    expect(result).toMatchObject({ updated: 1, skipped: 0, failed: [] });
+    provider = JSON.parse(readFileSync(join(piDir, "models.json"), "utf8"))
+      .providers[providerName];
+    expect(provider.models.map((model: any) => model.id)).toEqual(["ccr-sonnet"]);
+    expect(JSON.parse(readFileSync(join(projectPath, ".pi", "settings.json"), "utf8")))
+      .toMatchObject({ defaultProvider: providerName, defaultModel: "ccr-sonnet" });
+  });
+
+  it("migrates a legacy shared Pi provider when project takeovers are synchronized", async () => {
+    const projectPath = createProject();
+    const piDir = join(projectPath, "pi-agent");
+    mkdirSync(join(projectPath, ".pi"), { recursive: true });
+    writeFileSync(
+      join(projectPath, ".pi", "settings.json"),
+      JSON.stringify({ defaultProvider: "ccr", defaultModel: "ccr-opus" })
+    );
+    await writeProjectConfig(projectPath, { Router: projectRouter(false) });
+    const config = {
+      ...globalConfig(),
+      Clients: { pi: { configPath: piDir } },
+    };
+
+    const result = await syncGlobalProjectTakeovers(config);
+
+    expect(result).toMatchObject({ updated: 1, skipped: 0, failed: [] });
+    expect(JSON.parse(readFileSync(join(projectPath, ".pi", "settings.json"), "utf8")))
+      .toMatchObject({
+        defaultProvider: getPiProjectProviderName(projectPath),
+        defaultModel: "ccr-opus",
+      });
   });
 });

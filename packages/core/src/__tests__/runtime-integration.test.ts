@@ -1,4 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CCR_PROJECT_HEADER,
+  deleteProjectConfig,
+  getClaudeProjectId,
+  writeProjectConfig,
+} from "@wengine-ai/claude-code-router-shared";
 import Server from "../server";
 import { registerRequestPipeline, createCcrPreHandlerCallbacks } from "../ccr/request-pipeline";
 import { registerAdminRoutes } from "../ccr/admin-routes";
@@ -142,6 +151,70 @@ describe("runtime integration", () => {
       expect(fetchCalls[0].body).toContain('"model":"default"');
     } finally {
       await server.app.close();
+    }
+  });
+
+  it("routes Pi through its project Router and strips the internal header upstream", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "ccr-runtime-pi-project-"));
+    const projectId = getClaudeProjectId(projectPath);
+    await writeProjectConfig(projectPath, {
+      Router: {
+        default: "project,project-model",
+        enableFamilyRouting: false,
+      },
+    });
+    globalThis.fetch = vi.fn(async (url: any, init: any) => {
+      fetchCalls.push({
+        url: String(url),
+        body: init?.body,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      });
+      return nonStreamResponse({ model: "project-model" });
+    }) as any;
+
+    let server: Awaited<ReturnType<typeof buildRuntime>>["server"] | undefined;
+    try {
+      ({ server } = await buildRuntime({
+        Providers: [
+          {
+            name: "global",
+            api_base_url: "https://upstream.example/v1/messages",
+            api_key: "global-key",
+            models: ["global-model"],
+          },
+          {
+            name: "project",
+            api_base_url: "https://upstream.example/v1/messages",
+            api_key: "project-key",
+            models: ["project-model"],
+          },
+        ],
+        Router: {
+          default: "global,global-model",
+          enableFamilyRouting: false,
+        },
+      }));
+
+      const res = await server.app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: { [CCR_PROJECT_HEADER]: projectId },
+        payload: {
+          model: "ccr-opus",
+          messages: [{ role: "user", content: "hello" }],
+          system: "You are operating inside pi",
+          stream: false,
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0].body).toContain('"model":"project-model"');
+      expect(fetchCalls[0].headers[CCR_PROJECT_HEADER]).toBeUndefined();
+    } finally {
+      if (server) await server.app.close();
+      await deleteProjectConfig(projectPath);
+      rmSync(projectPath, { recursive: true, force: true });
     }
   });
 

@@ -8,6 +8,7 @@ import {
   isClientId,
   listClientStatuses,
   restoreClient,
+  syncGlobalProjectTakeovers,
   type ClientApplyResult,
   type ClientId,
   type ClientOperationResult,
@@ -26,10 +27,26 @@ function printOperationResults(result: ClientApplyResult): void {
   }
 }
 
+async function syncProjectTakeoversAndReport(config: Record<string, any>): Promise<boolean> {
+  try {
+    const syncResult = await syncGlobalProjectTakeovers(config);
+    for (const failure of syncResult.failed) {
+      console.error(`✗ project takeover sync ${failure.path} (${failure.id}): ${failure.error}`);
+    }
+    return syncResult.failed.length === 0;
+  } catch (error) {
+    console.error(
+      `✗ project takeover sync failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return false;
+  }
+}
+
 export async function enableConfiguredClientsForStart(): Promise<void> {
   const config = await readConfigFile();
   const result = enableConfiguredClients(config);
   await writeConfigFile(result.config);
+  await syncProjectTakeoversAndReport(result.config);
 
   if (!result.success) {
     printOperationResults(result);
@@ -105,8 +122,9 @@ async function runClientOperations(
   }
 
   await writeConfigFile(config);
+  const projectSyncSucceeded = await syncProjectTakeoversAndReport(config);
   return {
-    success: results.every((item) => item.success),
+    success: results.every((item) => item.success) && projectSyncSucceeded,
     results,
     clients: listClientStatuses(config),
     config,
@@ -126,8 +144,9 @@ export async function handleClientsCommand(args: string[]): Promise<void> {
       const config = await readConfigFile();
       const result = applyClientSelection(config, validateClientArgs(args.slice(1), true));
       await writeConfigFile(result.config);
+      const projectSyncSucceeded = await syncProjectTakeoversAndReport(result.config);
       printOperationResults(result);
-      if (!result.success) process.exit(1);
+      if (!result.success || !projectSyncSucceeded) process.exit(1);
       return;
     }
     case "enable":

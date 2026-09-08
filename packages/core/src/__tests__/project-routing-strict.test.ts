@@ -1,4 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CCR_PROJECT_HEADER,
+  getClaudeProjectId,
+} from "@wengine-ai/claude-code-router-shared";
 
 // --- Mocks must run before importing the module under test ---
 
@@ -54,6 +58,7 @@ vi.mock("fs/promises", () => ({
 }));
 
 import { ConfigService } from "../services/config";
+import { applyClientAdapter } from "../clients/adapters";
 import {
   router,
   ProjectRoutingError,
@@ -120,6 +125,18 @@ function setupNoProject() {
   mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
 }
 
+function setupExplicitProjectRouter(projectPath: string, projectRouter: Record<string, any>) {
+  const projectId = getClaudeProjectId(projectPath);
+  mockOpendir.mockRejectedValue(new Error("session discovery must not run"));
+  mockReadFile.mockImplementation(async (filePath: string) => {
+    if (typeof filePath === "string" && filePath.endsWith(`${projectId}/config.json`)) {
+      return JSON.stringify({ projectPath, Router: projectRouter });
+    }
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  });
+  return projectId;
+}
+
 function makeRequest(sessionId: string, model = "ccr-opus"): any {
   return {
     id: `req-${sessionId}`,
@@ -151,6 +168,180 @@ beforeEach(() => {
   mockPromotionGet.mockReturnValue(null);
   mockPromotionPromote.mockClear();
   mockHealthUnavailable.clear();
+});
+
+describe("Pi managed project routing", () => {
+  it("loads the explicit project Router without a Claude session transcript", async () => {
+    const projectPath = "/Users/test/projects/pi-app";
+    const projectId = setupExplicitProjectRouter(projectPath, {
+      default: "project-provider,project-model",
+      enableFallback: false,
+      enableFamilyRouting: false,
+    });
+    const config = makeConfig(
+      [{ name: "global-provider", enabled: true, models: ["global-model"] },
+       { name: "project-provider", enabled: true, models: ["project-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-project-request",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: projectId },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    // Match the real request pipeline: the adapter consumes and strips the
+    // internal header before the router phase runs.
+    applyClientAdapter(req, config.getAll());
+    expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
+    await router(req, undefined, { configService: config });
+
+    expect(req.body.model).toBe("project-provider,project-model");
+    expect(req.strictProjectRouting).toBe(true);
+    expect(req.projectId).toBe(projectId);
+    expect(mockOpendir).not.toHaveBeenCalled();
+  });
+
+  it("rejects a traversal project id instead of escaping to the global Router", async () => {
+    const config = makeConfig(
+      [{ name: "global-provider", enabled: true, models: ["global-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-invalid-project",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: "../../config" },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "invalid_project_id",
+      statusCode: 400,
+    });
+    expect(mockReadFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty managed project id instead of using the global Router", async () => {
+    const config = makeConfig(
+      [{ name: "global-provider", enabled: true, models: ["global-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-empty-project",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: "   " },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "invalid_project_id",
+      statusCode: 400,
+    });
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
+  });
+
+  it("fails closed when a managed project provider points to a deleted config", async () => {
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    const config = makeConfig(
+      [{ name: "global-provider", enabled: true, models: ["global-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-missing-project",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: "-Users-test-missing" },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "project_config_not_found",
+      statusCode: 404,
+    });
+  });
+
+  it("fails closed when the stored path does not match the managed project id", async () => {
+    const requestedPath = "/Users/test/projects/requested";
+    const projectId = getClaudeProjectId(requestedPath);
+    mockReadFile.mockResolvedValue(JSON.stringify({
+      projectPath: "/Users/test/projects/different",
+      Router: { default: "project-provider,project-model" },
+    }));
+    const config = makeConfig(
+      [{ name: "project-provider", enabled: true, models: ["project-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-mismatched-project",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: projectId },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "invalid_project_id",
+      statusCode: 400,
+    });
+    expect(mockOpendir).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an explicit project config has no stored project path", async () => {
+    const projectId = "-Users-test-project-without-path";
+    mockReadFile.mockResolvedValue(JSON.stringify({
+      Router: { default: "project-provider,project-model" },
+    }));
+    const config = makeConfig(
+      [{ name: "project-provider", enabled: true, models: ["project-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-project-without-path",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: projectId },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "invalid_project_id",
+      statusCode: 400,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -83,6 +83,19 @@ This is equivalent to running `ccr model --project` from that project's director
 you manage all configured projects from one place without needing a terminal open in each
 project.
 
+### Project takeover and Pi
+
+Project-level routing is supported for Pi when **Pi** is selected in the project's takeover
+client list. CCR writes `<project>/.pi/settings.json` and registers a dedicated
+`ccr-project-*` provider in Pi's global `~/.pi/agent/models.json`. That provider carries the
+managed project identity on each request, so CCR can load the matching project `Router`
+without relying on Claude Code session transcripts.
+
+The provider is intentionally unique per project; do not replace it with the shared global
+`ccr` provider. Existing shared-provider takeovers are migrated automatically when CCR starts
+or refreshes client configuration. Disabling global Pi takeover does not disable active Pi
+project takeovers.
+
 ## Managing Project Configuration with `ccr model --project`
 
 The easiest way to manage project-level routing is the interactive CLI:

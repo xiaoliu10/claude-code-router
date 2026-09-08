@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { CCR_PROJECT_HEADER } from "@wengine-ai/claude-code-router-shared";
 import { extractSessionIdFromUserId } from "../utils/session-id";
 
 export const CLIENT_TYPES = [
@@ -18,6 +19,8 @@ export interface ClientContext {
   clientType: ClientType;
   usageScope: ClientUsageScope;
   stableSessionId?: string;
+  projectId?: string;
+  projectHeaderPresent?: boolean;
   supportsExplicitExtendedContext: boolean;
   longContextThreshold?: number;
   extendedContextThreshold?: number;
@@ -48,6 +51,27 @@ function getPathname(req: any): string {
     return new URL(req.url, "http://127.0.0.1").pathname;
   } catch {
     return req.url;
+  }
+}
+
+function getHeader(req: any, name: string): { present: boolean; value?: string } {
+  const headers = req?.headers;
+  if (!headers || typeof headers !== "object") return { present: false };
+  const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name);
+  if (!key) return { present: false };
+
+  const raw = headers[key];
+  if (typeof raw === "string") return { present: true, value: raw.trim() };
+  if (Array.isArray(raw) && typeof raw[0] === "string") {
+    return { present: true, value: raw[0].trim() };
+  }
+  return { present: true };
+}
+
+function removeHeader(req: any, name: string): void {
+  if (!req?.headers || typeof req.headers !== "object") return;
+  for (const key of Object.keys(req.headers)) {
+    if (key.toLowerCase() === name) delete req.headers[key];
   }
 }
 
@@ -85,14 +109,19 @@ const claudeCodeAdapter: ClientAdapter = {
 
 const piAdapter: ClientAdapter = {
   type: "pi",
-  createContext() {
+  createContext(req) {
     // pi no longer derives extendedContextThreshold from a per-client ratio of
     // its own context window. Like every other client it inherits the absolute
     // threshold chain: familyConfig.extendedContextThreshold ->
     // Router.extendedContextThreshold -> 200000. The threshold represents the
     // default target model's usable window (which other models may not support),
     // not pi's own client window, so a uniform absolute value is correct.
-    return requestScopeContext("pi", false);
+    const projectHeader = getHeader(req, CCR_PROJECT_HEADER);
+    return {
+      ...requestScopeContext("pi", false),
+      projectId: projectHeader.value,
+      projectHeaderPresent: projectHeader.present,
+    };
   },
 };
 
@@ -165,6 +194,7 @@ export function detectClientType(req: any): ClientType {
   if (/\bYou are opencode\b/i.test(sysHead)) {
     return "opencode";
   }
+  if (getHeader(req, CCR_PROJECT_HEADER).present) return "pi";
 
   const billingHeader = headers["x-anthropic-billing-header"];
   if (typeof billingHeader === "string" && billingHeader.includes("cc_version=")) {
@@ -231,6 +261,15 @@ export function applyClientAdapter(
   } else {
     delete req.sessionId;
   }
+  if (context.projectHeaderPresent) {
+    req.projectId = context.projectId;
+  } else {
+    delete req.projectId;
+  }
+  // The project id is router-internal metadata. Keep it on the request
+  // context, but never let passthrough providers forward even an invalid or
+  // empty instance of the header upstream.
+  removeHeader(req, CCR_PROJECT_HEADER);
   req.usageSessionId = usageSessionId;
   req.usageCacheKey = `${clientType}:${scopeLabel}:${usageSessionId}`;
   return context;

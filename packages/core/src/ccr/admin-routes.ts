@@ -51,6 +51,7 @@ import {
   getClaudeProjectId,
   getProjectConfigPath,
   refreshCcrProjectTakeover,
+  refreshPiProjectTakeover,
   refreshProjectTakeovers,
   syncGlobalProjectTakeovers,
   getProjectTakeoverClients,
@@ -77,6 +78,19 @@ interface ProviderQuotaUsage {
   type7d?: 'rateLimit' | 'balance';
   /** Currency for balance display (e.g. "CNY", "USD") */
   currency?: string;
+}
+
+function logProjectTakeoverSyncFailures(
+  app: any,
+  result: Awaited<ReturnType<typeof syncGlobalProjectTakeovers>>,
+  source: string,
+): boolean {
+  if (result.failed.length === 0) return true;
+  app.log?.warn?.(
+    { source, projectTakeoverSync: result },
+    "Client configuration changed but some project takeovers failed to sync"
+  );
+  return false;
 }
 
 /**
@@ -349,7 +363,17 @@ export async function registerAdminRoutes(server: any, config: any): Promise<any
       const config = await readConfigFile();
       const result = applyClientSelection(config, enabled);
       await writeConfigFile(result.config);
-      return result;
+      const projectTakeoverSync = await syncGlobalProjectTakeovers(result.config);
+      const projectSyncSucceeded = logProjectTakeoverSyncFailures(
+        _app,
+        projectTakeoverSync,
+        "clients/apply"
+      );
+      return {
+        ...result,
+        success: result.success && projectSyncSucceeded,
+        projectTakeoverSync,
+      };
     } catch (error: any) {
       console.error("Failed to apply client integrations:", error);
       reply.status(500).send({ error: error.message || "Failed to apply client integrations" });
@@ -372,13 +396,20 @@ export async function registerAdminRoutes(server: any, config: any): Promise<any
             ? restoreClient(config, id)
             : disableClient(config, id);
       await writeConfigFile(config);
+      const projectTakeoverSync = await syncGlobalProjectTakeovers(config);
+      const projectSyncSucceeded = logProjectTakeoverSyncFailures(
+        _app,
+        projectTakeoverSync,
+        `clients/${id}/${action}`
+      );
 
       return {
-        success: result.success,
+        success: result.success && projectSyncSucceeded,
         result,
         results: [result],
         clients: listClientStatuses(config),
         config,
+        projectTakeoverSync,
       };
     } catch (error: any) {
       console.error(`Failed to ${action} client integration:`, error);
@@ -488,6 +519,7 @@ export async function registerAdminRoutes(server: any, config: any): Promise<any
         await refreshProjectTakeovers(existing.path, config);
       } else {
         await refreshCcrProjectTakeover(existing.path, config, Router);
+        await refreshPiProjectTakeover(existing.path, config, Router);
       }
       const ccrTakeoverClients = await getProjectTakeoverClients(existing.path);
       return {

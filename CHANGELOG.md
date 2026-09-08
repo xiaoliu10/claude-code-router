@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.3.2403] - 2026-09-07
+
+### Fixed
+
+- **Pi 项目级接管真正使用项目 Router**: Pi 本身支持项目级 `.pi/settings.json`，但 CCR 此前让所有项目共同选择全局 `ccr` provider，请求里没有可供服务端识别项目的会话元数据，因此最终始终命中全局模型路由。现在每个已接管项目都会获得独立的 `ccr-project-*` provider，其请求通过受管 header 携带项目 ID；服务端校验该 ID 与已保存的 `projectPath` 后直接加载对应项目 Router，无需依赖 Claude transcript。旧版共享 `ccr` 项目配置会在启动、保存配置或切换客户端时自动迁移；关闭全局 Pi 接管也会保留仍被项目使用的 provider。无效、篡改或已删除的项目映射会显式报错，不再静默逃逸到全局 Router；内部项目 header 在进入转发层前即被剥离，不会泄露给上游。shared/core 全量 293 项测试通过，并以 Pi 0.85.1 实际请求验证项目设置和 header 透传。
+
 ## [2.3.2402] - 2026-08-25
 
 ### Fixed
