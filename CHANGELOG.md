@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.3.2404] - 2026-09-08
+
+### Fixed
+
+- **opencode provider 默认携带 x-opencode-session 会话头**: OpenCode Go 端点现在强制要求 `x-opencode-session`（缺失直接 400 `MissingSessionID`），而 CCR 非透传模式重建上游请求时只带 `Authorization`，客户端原生会话头全部被丢弃，导致经 CCR 使用 opencode go 供应商（如 `omen-alpha`）全部请求失败。现在 opencode transformer 在 `transformRequestIn` 里按优先级复用稳定会话 ID：客户端原生 `x-opencode-session` 头 → CCR client adapter 已提取的稳定会话 ID（Claude Code 的 `metadata.user_id`）→ 请求体 `metadata.user_id` 兜底提取 → Codex 原生 `session_id` 头 → 最后回退每请求 UUID（满足硬性校验但失去跨请求缓存亲和）。同一会话内该值保持稳定，命中 Go 官方文档要求的路由与 prompt cache 优化；通过 transformer 标准的 `{body, config.headers}` 机制合并进上游请求。core 全量 269 项测试通过（含 4 个新增会话头用例）。
+
 ## [2.3.2403] - 2026-09-07
 
 ### Fixed
