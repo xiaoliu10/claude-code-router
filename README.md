@@ -93,6 +93,7 @@ npm install -g @wengine-ai/claude-code-router-next@latest && ccr restart
 
 | 版本 | 发布内容 |
 | --- | --- |
+| **v2.3.2404** | <ul><li>**opencode provider 默认携带 x-opencode-session 会话头**: OpenCode Go 端点强制要求 `x-opencode-session`（缺失直接 400），而 CCR 非透传模式重建上游请求时只带 `Authorization`，客户端会话头全部丢弃，导致 opencode go 供应商（如 `omen-alpha`）全部 400。opencode transformer 现按优先级复用稳定会话 ID：客户端原生 `x-opencode-session` 头 → client adapter 提取的 Claude Code 会话 ID（`metadata.user_id`）→ 请求体兜底提取 → Codex 原生 `session_id` 头 → 回退每请求 UUID；同一会话内值稳定，命中 Go 的路由与 prompt cache 优化。</li></ul> |
 | **v2.3.2403** | <ul><li>**修复 Pi 项目级路由未生效**: Pi 项目接管不再复用无法标识项目的全局 `ccr` provider；每个项目改用携带受管项目 ID 的独立 provider，服务端直接加载对应项目 Router。旧接管会自动迁移，关闭全局 Pi 接管不会破坏项目接管，无效映射也不会静默回落到全局模型。</li></ul> |
 | **v2.3.2402** | <ul><li>**formatResponse SSE 识别放宽**: 之前仅对 `application/json` 头 peek,上游用非标准 Content-Type(`text/plain`/空)返回 SSE 仍会报 non-JSON;现对任何非流式响应都先 peek 判 SSE。</li></ul> |
 | **v2.3.2400** | <ul><li>**SSE 误标 JSON 的多层彻底修复**: v2.3.2397–2399 只看首个 chunk,遇空首块/心跳(`: ping`)/分片(`ev`/`ent:`)仍误判报错;现改为累积多 chunk 判定,并统一修复 formatResponse、两个 transformer、hidden-error-check 与 validateStreamingResponse 四处,误标 SSE 全部按流式透传。</li></ul> |
@@ -102,7 +103,6 @@ npm install -g @wengine-ai/claude-code-router-next@latest && ccr restart
 | **v2.3.2396** | <ul><li>**修复 OpenRouter SSE 被当作 JSON 解析**: 最终响应改为按实际 Content-Type 判断流式/非流式，并为 transformer 的 JSON 解析增加原始响应预览，`stealth/ox-alpha` 等返回 `: OPENROUTER PROCESSING` 时不再只报 `Unexpected token ':'`。</li><li>**修复 OpenCode Go 多轮 thinking 缓存断点**: 历史 assistant `thinking` 现在会回放为 `reasoning_content` + signature，避免缓存只能命中到首个 thinking turn 前（常见约 64k）及 `reasoning_content must be passed back` 400；直连 181k 请求验证上游可命中 99.88%。</li><li>**自定义 transformer 参数可直接编辑**: 参数行新增编辑按钮，以 key/value 回填输入框；嵌套 JSON/布尔/数字可修改后按同名 key 覆盖，无需删除重输。</li></ul> |
 | **v2.3.2395** | <ul><li>**UI 转换器参数支持嵌套 JSON/布尔/数字**: 参数值此前一律按字符串保存，`customparams` 的 deep merge 无法应用字符串参数，结构化参数（如强制 reasoning 端点的 `{"enabled":true,"effort":"max"}`）在 UI 里配了也无效；现在按类型解析（畸形 JSON 保留原文），参数回显不再显示 `[object Object]`。</li></ul> |
 | **v2.3.2394** | <ul><li>**严格项目路由不再因熔断目标返回 503**: 项目目标仅因 health fail-pool 不可用且无备用模型时，CCR 跳过健康检查继续请求项目配置的同一模型，让客户端收到真实上游结果；供应商/模型缺失、禁用、格式或额度错误仍拒绝，不逃逸项目边界。</li><li>**修复非流式 TTFT 与 token 速率统计**: 非流式响应不再把总耗时冒充 TTFT（显示 `-`），速率改为输出 token ÷ 总耗时，并阻止假 TTFT 污染平均值。</li></ul> |
-| **v2.3.2393** | <ul><li>**项目接管按项目 Router 封顶上下文窗口**: 项目级接管此前只按全局 Router/ContextWindow 写 auto-compact 窗口，全局开 `[1m]` 而项目未启用扩展上下文时项目仍带 >200k 窗口，超 200k 后无可用模型；现在项目默认 family 或顶层 `enableExtendedContext` 未启用时窗口封顶 `min(ContextWindow, 200000)` 并清除陈旧 `[1m]` alias，保存项目 Router 与全局配置后都会刷新自定义 Router 项目的接管。用户手写窗口与 state 审计行为不变。</li><li>**opencode go 缓存命中从 0% 恢复**: zen 上游的提示词缓存以显式 `cache_control` 为前提（实测带标记第 2 次起 ≈98% 命中），transformer 此前把标记全部剥除导致永不缓存；现在保留标记，并在 `cached_tokens` 缺失时兜底映射 DeepSeek 风格 `prompt_cache_hit_tokens`。</li></ul> |
 
 > 仅保留最近 10 个版本，更早版本的发布摘要见 [CHANGELOG-archive.md](./CHANGELOG-archive.md)，完整详细变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 

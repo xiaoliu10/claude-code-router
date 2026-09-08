@@ -1,6 +1,6 @@
 {
   "name": "claude-code-router-workspace",
-  "version": "2.3.2403",
+  "version": "2.3.2404",
   "description": "Use Claude Code and Codex with any LLM provider, allowing flexible request/response routing and client configuration management",
   "scripts": {
     "build": "pnpm build:shared && pnpm build:core && pnpm build:server && pnpm build:cli && pnpm build:ui",
