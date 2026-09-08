@@ -233,6 +233,32 @@ describe("Pi managed project routing", () => {
     expect(mockReadFile).not.toHaveBeenCalled();
   });
 
+  it("rejects an empty managed project id instead of using the global Router", async () => {
+    const config = makeConfig(
+      [{ name: "global-provider", enabled: true, models: ["global-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-empty-project",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: "   " },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "invalid_project_id",
+      statusCode: 400,
+    });
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
+  });
+
   it("fails closed when a managed project provider points to a deleted config", async () => {
     mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     const config = makeConfig(
@@ -287,6 +313,34 @@ describe("Pi managed project routing", () => {
       statusCode: 400,
     });
     expect(mockOpendir).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an explicit project config has no stored project path", async () => {
+    const projectId = "-Users-test-project-without-path";
+    mockReadFile.mockResolvedValue(JSON.stringify({
+      Router: { default: "project-provider,project-model" },
+    }));
+    const config = makeConfig(
+      [{ name: "project-provider", enabled: true, models: ["project-model"] }],
+      { default: "global-provider,global-model", enableFamilyRouting: false },
+    );
+    const req = {
+      id: "pi-project-without-path",
+      url: "/v1/messages",
+      headers: { [CCR_PROJECT_HEADER]: projectId },
+      log,
+      body: {
+        model: "ccr-opus",
+        messages: [{ role: "user", content: "hello" }],
+        system: "You are operating inside pi",
+        tools: [],
+      },
+    };
+
+    await expect(router(req, undefined, { configService: config })).rejects.toMatchObject({
+      code: "invalid_project_id",
+      statusCode: 400,
+    });
   });
 });
 

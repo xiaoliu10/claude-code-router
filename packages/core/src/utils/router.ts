@@ -191,11 +191,13 @@ const getProjectSpecificRouter = async (
 ) => {
   // Session-based discovery remains the Claude Code path. Clients such as Pi
   // that do not send Claude session metadata use a managed provider header.
+  const hasExplicitProject = req.clientContext?.projectHeaderPresent === true;
   const explicitProject = req.clientContext?.projectId;
   if (
-    explicitProject
+    hasExplicitProject
     && (
       typeof explicitProject !== "string"
+      || explicitProject.length === 0
       || explicitProject.length > 1024
       || explicitProject === "."
       || explicitProject === ".."
@@ -211,15 +213,17 @@ const getProjectSpecificRouter = async (
     );
   }
 
-  const project = explicitProject || (req.sessionId
-    ? await searchProjectBySession(req.sessionId)
-    : null);
+  const project = hasExplicitProject
+    ? explicitProject
+    : req.sessionId
+      ? await searchProjectBySession(req.sessionId)
+      : null;
   if (project) {
     req.projectId = project;
     const projectConfigPath = join(HOME_DIR, project, "config.json");
 
     // Only session-discovered clients have per-session Router overrides.
-    if (!explicitProject && req.sessionId) {
+    if (!hasExplicitProject && req.sessionId) {
       const sessionConfigPath = join(
         HOME_DIR,
         project,
@@ -239,9 +243,11 @@ const getProjectSpecificRouter = async (
     try {
       const projectConfig = JSON.parse(await readFile(projectConfigPath, "utf8"));
       if (
-        explicitProject
-        && typeof projectConfig?.projectPath === "string"
-        && getClaudeProjectId(projectConfig.projectPath) !== explicitProject
+        hasExplicitProject
+        && (
+          typeof projectConfig?.projectPath !== "string"
+          || getClaudeProjectId(projectConfig.projectPath) !== explicitProject
+        )
       ) {
         throw new ProjectRoutingError(
           `Project routing error: managed project id "${explicitProject}" does not match its stored project path.`,
@@ -256,7 +262,7 @@ const getProjectSpecificRouter = async (
       }
     } catch (e: any) {
       if (e instanceof ProjectRoutingError) throw e;
-      if (explicitProject && e?.code === "ENOENT") {
+      if (hasExplicitProject && e?.code === "ENOENT") {
         throw new ProjectRoutingError(
           `Project routing error: managed project "${explicitProject}" no longer has a project config.`,
           {

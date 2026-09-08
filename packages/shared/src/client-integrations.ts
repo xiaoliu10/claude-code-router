@@ -1508,7 +1508,7 @@ export function applyPiProjectTakeover(projectPath: string, config: Record<strin
  */
 export function removePiProjectTakeover(
   projectPath: string,
-  config: Record<string, any> = {},
+  config: Record<string, any>,
 ): void {
   const expectedProviderName = getPiProjectProviderName(projectPath);
   const settingsPath = getPiProjectSettingsPath(projectPath);

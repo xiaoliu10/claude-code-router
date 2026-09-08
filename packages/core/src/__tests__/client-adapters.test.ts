@@ -193,9 +193,27 @@ describe("applyClientAdapter", () => {
       clientType: "pi",
       usageScope: "request",
       projectId: "-Users-test-project",
+      projectHeaderPresent: true,
     });
     expect(req.projectId).toBe("-Users-test-project");
     expect(req.sessionId).toBeUndefined();
+    expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
+  });
+
+  it("preserves an empty managed project id for validation and strips its header", () => {
+    const req = request({
+      id: "pi-empty-project",
+      headers: { [CCR_PROJECT_HEADER]: "   " },
+      body: { model: "ccr-opus", messages: [] },
+    });
+
+    applyClientAdapter(req, {});
+
+    expect(req.clientType).toBe("pi");
+    expect(req.clientContext).toMatchObject({
+      projectId: "",
+      projectHeaderPresent: true,
+    });
     expect(req.headers[CCR_PROJECT_HEADER]).toBeUndefined();
   });
 
